@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 
 function App() {
@@ -6,7 +6,7 @@ function App() {
   const [editingOrderId, setEditingOrderId] = useState(null);
   const [adminPasswordInput, setAdminPasswordInput] = useState("");
   const [adminError, setAdminError] = useState("");
-  const [page, setPage] = useState("request");
+  const [page, setPage] = useState("dashboard");
   const [ordersList, setOrdersList] = useState([]);
   const [copies, setCopies] = useState(1);
   const [paperSize, setPaperSize] = useState("A4");
@@ -20,6 +20,65 @@ function App() {
   const pricePerPage = printType === "Colored" ? 5 : 2;
   const estimatedCost = copies * pricePerPage;
 
+  // Persist status directly to MongoDB database
+  async function updateOrderStatusInDB(id, newStatus) {
+    try {
+      await fetch(`http://localhost:5000/api/orders/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus })
+      });
+    } catch (error) {
+      console.error("Error saving persistent status:", error);
+    }
+  }
+
+  // Real Sequential Queue System with Permanent Database Locking
+  useEffect(() => {
+    if (page !== "my-orders" || ordersList.length === 0) return;
+
+    const timer = setInterval(() => {
+      setOrdersList((prevOrders) => {
+        const activeOrderIndex = prevOrders.findIndex(
+          (o) => o.status !== "Ready for Pickup"
+        );
+
+        if (activeOrderIndex === -1) return prevOrders;
+
+        return prevOrders.map((order, index) => {
+          if (order.status === "Ready for Pickup") return order;
+
+          if (index === activeOrderIndex) {
+            const currentProgress = order.simulatedProgress || 0;
+            const requiredTimeUnits = Math.max(3, (order.copies || 1) * 3);
+
+            if (currentProgress + 1 >= requiredTimeUnits) {
+              updateOrderStatusInDB(order._id, "Ready for Pickup");
+              return {
+                ...order,
+                status: "Ready for Pickup",
+                simulatedProgress: currentProgress + 1
+              };
+            } else {
+              if (order.status !== "In Process") {
+                updateOrderStatusInDB(order._id, "In Process");
+              }
+              return {
+                ...order,
+                status: "In Process",
+                simulatedProgress: currentProgress + 1
+              };
+            }
+          }
+
+          return { ...order, status: order.status || "Pending" };
+        });
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [page, ordersList.length]);
+
   function handleRequest(event) {
     event.preventDefault();
     setPage("payment");
@@ -31,13 +90,16 @@ function App() {
     window.scrollTo(0, 0);
   }
 
-  // Function to handle updating an order status (Admin)
   async function handleUpdateStatus(id, currentStatus) {
     const newStatus = currentStatus === "Pending" ? "Ready for Pickup" : "Pending";
     try {
+      const token = localStorage.getItem("adminToken");
       const response = await fetch(`http://localhost:5000/api/orders/${id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
         body: JSON.stringify({ status: newStatus })
       });
       if (response.ok) {
@@ -48,12 +110,15 @@ function App() {
     }
   }
 
-  // Function to handle deleting an order
   async function handleDeleteOrder(id) {
     if (!window.confirm("Are you sure you want to delete this order?")) return;
     try {
+      const token = localStorage.getItem("adminToken");
       const response = await fetch(`http://localhost:5000/api/orders/${id}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${token}`
+        }
       });
       if (response.ok) {
         fetchAdminOrders();
@@ -73,7 +138,6 @@ function App() {
     }
   }
 
-  // Function to start editing a pending order (Client)
   function handleStartEdit(order) {
     if (order.status !== "Pending" && order.status) {
       alert("You can only edit orders that are still Pending!");
@@ -89,21 +153,10 @@ function App() {
     setPage("request");
   }
 
-  // Function to save edited order or create a new one
   async function handleSaveOrder() {
-    const orderData = {
-      copies,
-      paperSize,
-      printType,
-      sides,
-      instructions,
-      paymentMethod,
-      estimatedCost
-    };
-
     try {
       if (editingOrderId) {
-        // UPDATE existing order via PUT
+        const orderData = { copies, paperSize, printType, sides, instructions, paymentMethod, estimatedCost };
         const response = await fetch(`http://localhost:5000/api/orders/${editingOrderId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -115,17 +168,31 @@ function App() {
           fetchAdminOrders();
         }
       } else {
-        // CREATE new order via POST
         const reference = "EP-" + Date.now().toString().slice(-8);
         setOrderNumber(reference);
+
+        // Using FormData for real file uploads
+        const formData = new FormData();
+        formData.append("orderNumber", reference);
+        formData.append("copies", copies);
+        formData.append("paperSize", paperSize);
+        formData.append("printType", printType);
+        formData.append("sides", sides);
+        formData.append("instructions", instructions || "");
+        formData.append("paymentMethod", paymentMethod);
+        formData.append("estimatedCost", estimatedCost);
+        if (file) {
+          formData.append("document", file);
+        }
+
         const response = await fetch("http://localhost:5000/api/orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orderNumber: reference, ...orderData })
+          body: formData
         });
-        const data = await response.json();
-        console.log("Server response:", data);
-        setPage("confirmation");
+
+        if (response.ok) {
+          setPage("confirmation");
+        }
       }
     } catch (error) {
       console.error("Error saving order:", error);
@@ -138,6 +205,9 @@ function App() {
     window.scrollTo(0, 0);
   }
 
+  const pendingCount = ordersList.filter(o => (o.status || "Pending") === "Pending").length;
+  const readyCount = ordersList.filter(o => o.status === "Ready for Pickup").length;
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -146,10 +216,11 @@ function App() {
         <nav>
           <a
             href="#dashboard"
-            className={page === "request" ? "active" : ""}
+            className={page === "dashboard" ? "active" : ""}
             onClick={(event) => {
               event.preventDefault();
-              setPage("request");
+              setPage("dashboard");
+              fetchAdminOrders();
             }}
           >
             Dashboard
@@ -192,6 +263,67 @@ function App() {
       </aside>
 
       <main className="main-content">
+        {page === "dashboard" && (
+          <>
+            <header className="topbar">
+              <div>
+                <p className="eyebrow">STUDENT PORTAL</p>
+                <h1>Welcome Back! 👋</h1>
+                <p>Everything looks good. Here is your quick printing summary.</p>
+              </div>
+              <div className="user-avatar">S</div>
+            </header>
+
+            <section className="welcome-card">
+              <div>
+                <p className="eyebrow">CHILL & FAST</p>
+                <h2>Skip the long queue today.</h2>
+                <p>Upload your files, pay securely via GCash or Maya, and drop by only when it is ready for pickup.</p>
+              </div>
+            </section>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "20px", marginBottom: "25px" }}>
+              <div className="request-card" style={{ marginBottom: 0, textAlign: "center", padding: "25px" }}>
+                <p className="eyebrow">Ready for Pickup</p>
+                <h3 style={{ fontSize: "36px", color: "#16a34a", marginTop: "8px" }}>{readyCount}</h3>
+                <p style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>Completed print jobs</p>
+              </div>
+              <div className="request-card" style={{ marginBottom: 0, textAlign: "center", padding: "25px" }}>
+                <p className="eyebrow">In Queue / Pending</p>
+                <h3 style={{ fontSize: "36px", color: "#d97706", marginTop: "8px" }}>{pendingCount}</h3>
+                <p style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>Processing or waiting</p>
+              </div>
+            </div>
+
+            <section className="request-card">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">QUICK ACTIONS</p>
+                  <h2>Get Started</h2>
+                </div>
+              </div>
+              <p style={{ color: "#475569", marginBottom: "20px", fontSize: "14px", lineHeight: "1.6" }}>
+                Need to pass an assignment or print out reviewer notes? Start a new print request now or inspect your live queue status.
+              </p>
+              <div style={{ display: "flex", gap: "15px" }}>
+                <button
+                  className="submit-button"
+                  onClick={() => { setEditingOrderId(null); setPage("request"); }}
+                >
+                  Create New Print Request →
+                </button>
+                <button
+                  className="submit-button"
+                  style={{ background: "#334155" }}
+                  onClick={() => { setPage("my-orders"); fetchAdminOrders(); }}
+                >
+                  View Live Queue →
+                </button>
+              </div>
+            </section>
+          </>
+        )}
+
         {page === "request" && (
           <>
             <header className="topbar">
@@ -202,15 +334,6 @@ function App() {
               </div>
               <div className="user-avatar">S</div>
             </header>
-
-            <section className="welcome-card">
-              <div>
-                <p className="eyebrow">WELCOME TO E-PRINT</p>
-                <h2>Skip the long queue.</h2>
-                <p>Prepare your printing request online before visiting the shop.</p>
-              </div>
-              <span className="printer-icon"></span>
-            </section>
 
             <section className="request-card" id="request">
               <div className="section-heading">
@@ -396,32 +519,50 @@ function App() {
 
         {page === "my-orders" && (
           <section className="request-card" style={{ padding: "20px" }}>
-            <h2>My Orders History</h2>
-            <button onClick={() => { setEditingOrderId(null); setPage("request"); }} style={{ marginBottom: "15px", padding: "8px 15px", cursor: "pointer" }}>
-              ← Back to New Request
+            <h2>Live Sequential Printing Queue</h2>
+            <p className="muted-text" style={{ marginBottom: "15px" }}>
+              Orders process one by one at standard print speeds (~3 seconds per page).
+            </p>
+            <button onClick={() => { setEditingOrderId(null); setPage("dashboard"); }} style={{ marginBottom: "15px", padding: "8px 15px", cursor: "pointer" }}>
+              ← Back to Dashboard
             </button>
             <div className="orders-list">
               {ordersList.length === 0 ? (
                 <p>No orders found yet.</p>
               ) : (
-                ordersList.map((order) => (
-                  <div key={order._id} style={{ border: "1px solid #ccc", padding: "15px", marginBottom: "15px", borderRadius: "8px", background: "#fff" }}>
-                    <strong>Reference: {order.orderNumber}</strong>
-                    <p>Paper Size: {order.paperSize} | Copies: {order.copies}</p>
-                    <p>Type: {order.printType} ({order.sides})</p>
-                    <p>Status: <span style={{ fontWeight: "bold", color: (order.status || "Pending") === "Ready for Pickup" ? "green" : "orange" }}>{order.status || "Pending"}</span></p>
-                    
-                    {/* Client Edit button available only for Pending orders */}
-                    {(!order.status || order.status === "Pending") && (
-                      <button
-                        onClick={() => handleStartEdit(order)}
-                        style={{ marginTop: "10px", padding: "6px 12px", background: "#ffc107", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "bold" }}
-                      >
-                        Edit Order Details
-                      </button>
-                    )}
-                  </div>
-                ))
+                ordersList.map((order) => {
+                  const currentStatus = order.status || "Pending";
+                  const statusColor =
+                    currentStatus === "Ready for Pickup"
+                      ? "green"
+                      : currentStatus === "In Process"
+                      ? "#007bff"
+                      : "orange";
+
+                  return (
+                    <div key={order._id} style={{ border: "1px solid #ccc", padding: "15px", marginBottom: "15px", borderRadius: "8px", background: "#fff" }}>
+                      <strong>Reference: {order.orderNumber}</strong>
+                      <p>Paper Size: {order.paperSize} | Copies: {order.copies}</p>
+                      <p>Type: {order.printType} ({order.sides})</p>
+                      <p>
+                        Live Status:{" "}
+                        <span style={{ fontWeight: "bold", color: statusColor }}>
+                          {currentStatus}
+                        </span>
+                      </p>
+                      <p style={{ fontSize: "12px", color: "gray" }}>Ordered on: {new Date(order.createdAt).toLocaleString()}</p>
+                      
+                      {currentStatus === "Pending" && (
+                        <button
+                          onClick={() => handleStartEdit(order)}
+                          style={{ marginTop: "10px", padding: "6px 12px", background: "#ffc107", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "bold" }}
+                        >
+                          Edit Order Details
+                        </button>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           </section>
@@ -446,8 +587,8 @@ function App() {
             <div className="notice">
               This order is successfully prepared. Show your order reference and payment confirmation screenshot to the E-Print shop staff!
             </div>
-            <button className="submit-button" onClick={() => { setEditingOrderId(null); setPage("request"); }}>
-              Create Another Request
+            <button className="submit-button" onClick={() => { setEditingOrderId(null); setPage("dashboard"); }}>
+              Back to Dashboard
             </button>
           </section>
         )}
@@ -455,21 +596,32 @@ function App() {
         {page === "admin" && (
           <section className="admin-dashboard" style={{ padding: "20px" }}>
             <h2>Admin Dashboard</h2>
-            <button onClick={() => { setPage("request"); setIsAdminAuthenticated(false); setAdminPasswordInput(""); }}>
-              Back to Order Form
+            <button onClick={() => { setPage("dashboard"); setIsAdminAuthenticated(false); setAdminPasswordInput(""); }}>
+              Back to Dashboard
             </button>
             {!isAdminAuthenticated ? (
               <div style={{ maxWidth: "400px", margin: "40px auto", padding: "20px", border: "1px solid #ccc", borderRadius: "8px", background: "#f9f9f9" }}>
                 <h3>Admin Login Required</h3>
                 <p style={{ fontSize: "14px", color: "#666" }}>Please enter the admin password to manage orders.</p>
-                <form onSubmit={(e) => {
+                <form onSubmit={async (e) => {
                   e.preventDefault();
-                  if (adminPasswordInput === "groupwork") {
-                    setIsAdminAuthenticated(true);
-                    setAdminError("");
-                    fetchAdminOrders();
-                  } else {
-                    setAdminError("Incorrect password. Please try again.");
+                  try {
+                    const res = await fetch("http://localhost:5000/api/admin/login", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ password: adminPasswordInput })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                      localStorage.setItem("adminToken", data.token);
+                      setIsAdminAuthenticated(true);
+                      setAdminError("");
+                      fetchAdminOrders();
+                    } else {
+                      setAdminError(data.error || "Incorrect password.");
+                    }
+                  } catch (err) {
+                    setAdminError("Server connection failed.");
                   }
                 }}>
                   <input
@@ -491,7 +643,7 @@ function App() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
                   <p>Welcome, Admin! You can now update or delete orders.</p>
                   <button
-                    onClick={() => { setIsAdminAuthenticated(false); setAdminPasswordInput(""); }}
+                    onClick={() => { setIsAdminAuthenticated(false); setAdminPasswordInput(""); localStorage.removeItem("adminToken"); }}
                     style={{ padding: "5px 10px", background: "#6c757d", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
                   >
                     Lock / Logout

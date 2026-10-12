@@ -1,15 +1,15 @@
 const mongoose = require('mongoose');
 
-const orderSchema = new mongoose.Schema({
-  orderNumber: String,
-  copies: Number,
-  paperSize: String,
-  printType: String,
-  sides: String,
-  instructions: String,
-  paymentMethod: String,
-  estimatedCost: Number,
-  createdAt: { type: Date, default: Date.now }
-});
+const OrderSchema = new mongoose.Schema({
+  orderNumber: { type: String, required: true },
+  copies: { type: Number, required: true },
+  paperSize: { type: String, required: true },
+  printType: { type: String, required: true },
+  sides: { type: String, required: true },
+  instructions: { type: String },
+  paymentMethod: { type: String, required: true },
+  estimatedCost: { type: Number, required: true },
+  status: { type: String, default: "Pending" } // <--- MUST have this!
+}, { timestamps: true });
 
-module.exports = mongoose.model('Order', orderSchema);
+module.exports = mongoose.model('Order', OrderSchema);

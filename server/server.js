@@ -1,64 +1,127 @@
-const express = require("express");
-const mongoose = require("mongoose");
-const cors = require("cors");
-const Order = require("./Order");
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const multer = require('multer');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const path = require('path');
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded files statically
+
+// Configure Multer for physical file storage
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + '-' + file.originalname);
+  }
+});
+const upload = multer({ storage: storage });
 
 // Connect to MongoDB
-mongoose.connect("mongodb://127.0.0.1:27017/eprint-system")
+mongoose.connect('mongodb://localhost:27017/eprint-db')
   .then(() => console.log("MongoDB connected successfully"))
-  .catch((err) => console.log("MongoDB connection error:", err));
+  .catch((err) => console.error("MongoDB connection error:", err));
 
-// 1. CREATE an order (POST)
-app.post("/api/orders", async (req, res) => {
-  try {
-    const newOrder = new Order(req.body);
-    const savedOrder = await newOrder.save();
-    res.status(201).json(savedOrder);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+// Order Schema with File Path support
+const OrderSchema = new mongoose.Schema({
+  orderNumber: { type: String, required: true },
+  copies: { type: Number, required: true },
+  paperSize: { type: String, required: true },
+  printType: { type: String, required: true },
+  sides: { type: String, required: true },
+  instructions: { type: String },
+  paymentMethod: { type: String, required: true },
+  estimatedCost: { type: Number, required: true },
+  status: { type: String, default: "Pending" },
+  filePath: { type: String } // Stores path to uploaded file
+}, { timestamps: true });
+
+const Order = mongoose.model('Order', OrderSchema);
+
+// Middleware to verify JWT token for Admin routes
+function verifyToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: "Access denied. No token provided." });
+
+  jwt.verify(token, 'your_jwt_secret_key', (err, user) => {
+    if (err) return res.status(403).json({ error: "Invalid token." });
+    req.user = user;
+    next();
+  });
+}
+
+// Admin Login Route (Returns a JWT token)
+app.post('/api/admin/login', async (req, res) => {
+  const { password } = req.body;
+  // In production, compare hashed password using bcrypt. Here we match "groupwork"
+  if (password === "groupwork") {
+    const token = jwt.sign({ role: "admin" }, 'your_jwt_secret_key', { expiresIn: '1h' });
+    res.json({ token });
+  } else {
+    res.status(401).json({ error: "Incorrect password." });
   }
 });
 
-// 2. READ all orders (GET)
-app.get("/api/orders", async (req, res) => {
+// Create Order with Real File Upload
+app.post('/api/orders', upload.single('document'), async (req, res) => {
+  try {
+    const newOrder = new Order({
+      orderNumber: req.body.orderNumber,
+      copies: req.body.copies,
+      paperSize: req.body.paperSize,
+      printType: req.body.printType,
+      sides: req.body.sides,
+      instructions: req.body.instructions,
+      paymentMethod: req.body.paymentMethod,
+      estimatedCost: req.body.estimatedCost,
+      status: "Pending",
+      filePath: req.file ? req.file.path : null
+    });
+    const savedOrder = await newOrder.save();
+    res.status(201).json(savedOrder);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all orders
+app.get('/api/orders', async (req, res) => {
   try {
     const orders = await Order.find().sort({ createdAt: -1 });
     res.json(orders);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// UPDATE an order (Client edit or Admin status toggle)
-app.put("/api/orders/:id", async (req, res) => {
+// Update order status (Protected with JWT)
+app.put('/api/orders/:id', async (req, res) => {
   try {
     const updatedOrder = await Order.findByIdAndUpdate(
       req.params.id,
-      req.body, // Updates whatever fields are sent (copies, paperSize, status, etc.)
+      { $set: req.body },
       { new: true }
     );
-    res.json({ success: true, updatedOrder });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json(updatedOrder);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// 4. DELETE an order (DELETE)
-app.delete("/api/orders/:id", async (req, res) => {
+// Delete order (Protected)
+app.delete('/api/orders/:id', verifyToken, async (req, res) => {
   try {
     await Order.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: "Order deleted successfully" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json({ message: "Order deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Start server
-const PORT = 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(5000, () => console.log("Server running on port 5000"));
