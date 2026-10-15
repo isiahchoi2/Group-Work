@@ -8,17 +8,29 @@ function App() {
   const [adminError, setAdminError] = useState("");
   const [page, setPage] = useState("dashboard");
   const [ordersList, setOrdersList] = useState([]);
-  const [copies, setCopies] = useState(1);
+  const [copies, setCopies] = useState("1");
   const [paperSize, setPaperSize] = useState("A4");
   const [printType, setPrintType] = useState("Black and White");
   const [sides, setSides] = useState("Single-sided");
   const [instructions, setInstructions] = useState("");
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState("GCash");
   const [orderNumber, setOrderNumber] = useState("");
 
-  const pricePerPage = printType === "Colored" ? 5 : 2;
-  const estimatedCost = copies * pricePerPage;
+  // Dynamic Pricing Calculation based on paper size, print type, copy count, and file count
+  let pricePerPage = 2.00;
+  if (printType === "Black and White") {
+    if (paperSize === "Letter") pricePerPage = 2.00;
+    if (paperSize === "A4") pricePerPage = 3.00;
+    if (paperSize === "Legal") pricePerPage = 4.00;
+  } else {
+    if (paperSize === "Letter") pricePerPage = 10.00;
+    if (paperSize === "A4") pricePerPage = 12.00;
+    if (paperSize === "Legal") pricePerPage = 15.00;
+  }
+
+  const totalFilesCount = files.length > 0 ? files.length : 0;
+  const estimatedCost = Number(copies || 0) * totalFilesCount * pricePerPage;
 
   // Persist status directly to MongoDB database
   async function updateOrderStatusInDB(id, newStatus) {
@@ -33,12 +45,13 @@ function App() {
     }
   }
 
-  // Real Sequential Queue System with Permanent Database Locking
+// Real Sequential Queue System with Permanent Database Locking (FIFO)
   useEffect(() => {
     if (page !== "my-orders" || ordersList.length === 0) return;
 
     const timer = setInterval(() => {
       setOrdersList((prevOrders) => {
+        // Find the first order that is NOT yet Ready for Pickup
         const activeOrderIndex = prevOrders.findIndex(
           (o) => o.status !== "Ready for Pickup"
         );
@@ -48,9 +61,10 @@ function App() {
         return prevOrders.map((order, index) => {
           if (order.status === "Ready for Pickup") return order;
 
+          // Only process the topmost active order in the queue
           if (index === activeOrderIndex) {
             const currentProgress = order.simulatedProgress || 0;
-            const requiredTimeUnits = Math.max(3, (order.copies || 1) * 3);
+            const requiredTimeUnits = 15 + Math.max(3, (order.copies || 1) * 3);
 
             if (currentProgress + 1 >= requiredTimeUnits) {
               updateOrderStatusInDB(order._id, "Ready for Pickup");
@@ -60,12 +74,13 @@ function App() {
                 simulatedProgress: currentProgress + 1
               };
             } else {
-              if (order.status !== "In Process") {
-                updateOrderStatusInDB(order._id, "In Process");
+              const newStatus = currentProgress >= 15 ? "In Process" : "Pending";
+              if (order.status !== newStatus) {
+                updateOrderStatusInDB(order._id, newStatus);
               }
               return {
                 ...order,
-                status: "In Process",
+                status: newStatus,
                 simulatedProgress: currentProgress + 1
               };
             }
@@ -81,6 +96,25 @@ function App() {
 
   function handleRequest(event) {
     event.preventDefault();
+
+    // STRICT CHECK: If NOT editing, files are required. If editing, files are optional (keeps existing ones).
+    if (!editingOrderId && (!files || files.length === 0)) {
+      alert("Error: Please select at least one document or image to print!");
+      return;
+    }
+
+    // Check if copies is valid, at least 1, and capped at 500
+    const numCopies = Number(copies);
+    if (!copies || isNaN(numCopies) || numCopies <= 0) {
+      alert("Error: Number of copies must be at least 1! You can't print 0 copies.");
+      return;
+    }
+
+    if (numCopies > 500) {
+      alert("Error: Maximum allowed copies per request is 500!");
+      return;
+    }
+
     setPage("payment");
     window.scrollTo(0, 0);
   }
@@ -132,6 +166,10 @@ function App() {
     try {
       const response = await fetch("http://localhost:5000/api/orders");
       const data = await response.json();
+      
+      // Sort oldest to newest (First-In, First-Out queue)
+      data.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
       setOrdersList(data);
     } catch (error) {
       console.error("Error fetching orders:", error);
@@ -181,8 +219,12 @@ function App() {
         formData.append("instructions", instructions || "");
         formData.append("paymentMethod", paymentMethod);
         formData.append("estimatedCost", estimatedCost);
-        if (file) {
-          formData.append("document", file);
+        
+        // Append multiple files loop
+        if (files && files.length > 0) {
+          files.forEach((singleFile) => {
+            formData.append("documents", singleFile);
+          });
         }
 
         const response = await fetch("http://localhost:5000/api/orders", {
@@ -192,10 +234,14 @@ function App() {
 
         if (response.ok) {
           setPage("confirmation");
+        } else {
+          const errData = await response.json();
+          alert("Server error: " + (errData.error || "Failed to place order"));
         }
       }
     } catch (error) {
       console.error("Error saving order:", error);
+      alert("Network error: Make sure your backend server is running on port 5000.");
     }
     window.scrollTo(0, 0);
   }
@@ -222,7 +268,7 @@ function App() {
               setPage("dashboard");
               fetchAdminOrders();
             }}
-          >
+          > 
             Dashboard
           </a>
           <a
@@ -346,23 +392,43 @@ function App() {
               <form onSubmit={handleRequest}>
                 <label>
                   Document
-                  <input
+                  <label>
+                   Document(s) (Select up to 200 files)
+                   <input
                     type="file"
-                    accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-                    onChange={(event) => setFile(event.target.files[0] || null)}
-                  />
+                     multiple
+                     accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+                     onChange={(event) => {
+                      const selectedFiles = Array.from(event.target.files);
+                      if (selectedFiles.length > 200) {
+                        alert("You can only upload a maximum of 200 files at once!");
+                         return;
+                          }
+                       setFiles(selectedFiles);
+                       }}
+                     />
+                  <small>Hold Ctrl / Shift to select multiple files (Max: 200)</small>
+                  </label>
                   <small>Accepted formats: PDF, DOC, DOCX, JPG, PNG</small>
                 </label>
                 <div className="form-grid">
                   <label>
                     Number of Copies
                     <input
-                      type="number"
-                      min="1"
-                      max="500"
-                      value={copies}
-                      onChange={(event) => setCopies(Math.max(1, Number(event.target.value) || 1))}
-                      required
+                     type="number"
+                     min="1"
+                     max="500"
+                     value={copies}
+                     onChange={(event) => {
+                       const val = event.target.value;
+                       if (Number(val) > 500) {
+                         alert("Maximum limit is 500 copies per print request.");
+                         setCopies("500");
+                       } else {
+                         setCopies(val);
+                       }
+                     }}
+                     required
                     />
                   </label>
                   <label>
@@ -450,10 +516,10 @@ function App() {
                 <h3>Scan to Pay via {paymentMethod}</h3>
                 <p>Please scan the QR code below using your mobile wallet app:</p>
                 <img
-                  src={paymentMethod === "GCash" ? "/Gcash.png.png" : "/Maya.png.png"}
-                  alt="Payment QR Code"
-                  style={{ width: "200px", height: "200px", border: "2px solid #ccc", borderRadius: "10px", marginTop: "10px", marginBottom: "10px", objectFit: "contain", background: "white" }}
-                />
+                    src={paymentMethod === "GCash" ? "http://localhost:5000/Gcash.png.png" : "http://localhost:5000/Maya.png.png"}
+                    alt="Payment QR Code"
+                    style={{ width: "200px", height: "200px", objectFit: "contain", background: "white" }}
+                    />
                 <p style={{ fontSize: "14px", color: "gray" }}>
                   After paying via {paymentMethod}, show your reference or screenshot to the shop staff!
                 </p>
@@ -485,12 +551,16 @@ function App() {
             <section className="request-card">
               <h2>Order Summary</h2>
               <div className="checkout-document">
-                <span className="document-icon">📄</span>
-                <div>
-                  <strong>{file ? file.name : "No document selected"}</strong>
-                  <small>Printing document</small>
-                </div>
+                   <span className="document-icon">📂</span>
+                    <div>
+                   <strong>{files.length > 0 ? `${files.length} file(s) selected` : "No document selected"}</strong>
+                   <ul style={{ fontSize: "12px", color: "#64748b", paddingLeft: "15px", marginTop: "4px" }}>
+                    {files.map((f, i) => (
+                     <li key={i}>{f.name}</li>
+                   ))}
+               </ul>
               </div>
+             </div>
               <div className="checkout-details">
                 <div><span>Number of copies</span><strong>{copies}</strong></div>
                 <div><span>Paper size</span><strong>{paperSize}</strong></div>
@@ -544,6 +614,9 @@ function App() {
                       <strong>Reference: {order.orderNumber}</strong>
                       <p>Paper Size: {order.paperSize} | Copies: {order.copies}</p>
                       <p>Type: {order.printType} ({order.sides})</p>
+                      <p style={{ background: "#f8fafc", padding: "8px", borderRadius: "6px", marginTop: "6px" }}>
+                      <strong>Special Instructions:</strong> {order.instructions || "None"}
+                      </p>
                       <p>
                         Live Status:{" "}
                         <span style={{ fontWeight: "bold", color: statusColor }}>
@@ -659,6 +732,12 @@ function App() {
                         <p>Paper Size: {order.paperSize} | Copies: {order.copies}</p>
                         <p>Type: {order.printType} ({order.sides})</p>
                         <p>Payment: {order.paymentMethod} Total: ₱{order.estimatedCost}</p>
+                        <div style={{ background: "#f1f5f9", padding: "10px", borderRadius: "6px", margin: "8px 0", border: "1px solid #cbd5e1" }}>
+                            <strong>Special Instructions:</strong>
+                            <p style={{ margin: "4px 0 0 0", color: "#334155", fontStyle: "italic" }}>
+                            {order.instructions && order.instructions.trim() !== "" ? order.instructions : "None provided"}
+                        </p>
+                        </div>
                         <p>Status: <span style={{ fontWeight: "bold", color: (order.status || "Pending") === "Ready for Pickup" ? "green" : "orange" }}>{order.status || "Pending"}</span></p>
                         <p style={{ fontSize: "12px", color: "gray" }}>Ordered on: {new Date(order.createdAt).toLocaleString()}</p>
                         <div style={{ marginTop: "10px", display: "flex", gap: "10px" }}>

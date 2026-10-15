@@ -456,4 +456,13 @@ form small {
 .pending-status {
   color: #d97706;
   font-weight: 600;
+
+h1, h2, h3, h4, h5, h6 {
+  color: #0f172a !important;
+  opacity: 1 !important;
+}
+
+.main-content h1, .main-content h2, .main-content p {
+  color: inherit;
+}
 }

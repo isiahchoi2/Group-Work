@@ -7,9 +7,16 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 
 const app = express();
+
+// Middleware
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded files statically
+
+// Serve static QR code images and assets from the client public folder
+app.use(express.static(path.join(__dirname, "../client/public")));
+
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Configure Multer for physical file storage
 const storage = multer.diskStorage({
@@ -27,7 +34,7 @@ mongoose.connect('mongodb://localhost:27017/eprint-db')
   .then(() => console.log("MongoDB connected successfully"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Order Schema with File Path support
+// Order Schema with Multiple Files and Instructions support
 const OrderSchema = new mongoose.Schema({
   orderNumber: { type: String, required: true },
   copies: { type: Number, required: true },
@@ -38,10 +45,34 @@ const OrderSchema = new mongoose.Schema({
   paymentMethod: { type: String, required: true },
   estimatedCost: { type: Number, required: true },
   status: { type: String, default: "Pending" },
-  filePath: { type: String } // Stores path to uploaded file
+  filePaths: [{ type: String }]
 }, { timestamps: true });
 
 const Order = mongoose.model('Order', OrderSchema);
+
+// Create Order with Multiple File Uploads
+app.post('/api/orders', upload.array('documents', 200), async (req, res) => {
+  try {
+    const filePaths = req.files ? req.files.map(f => f.path) : [];
+    const newOrder = new Order({
+      orderNumber: req.body.orderNumber,
+      copies: req.body.copies,
+      paperSize: req.body.paperSize,
+      printType: req.body.printType,
+      sides: req.body.sides,
+      instructions: req.body.instructions || "",
+      paymentMethod: req.body.paymentMethod,
+      estimatedCost: req.body.estimatedCost,
+      status: "Pending",
+      filePaths: filePaths
+    });
+    const savedOrder = await newOrder.save();
+    res.status(201).json(savedOrder);
+  } catch (error) {
+    console.error("Error saving order:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Middleware to verify JWT token for Admin routes
 function verifyToken(req, res, next) {
@@ -59,34 +90,11 @@ function verifyToken(req, res, next) {
 // Admin Login Route (Returns a JWT token)
 app.post('/api/admin/login', async (req, res) => {
   const { password } = req.body;
-  // In production, compare hashed password using bcrypt. Here we match "groupwork"
   if (password === "groupwork") {
     const token = jwt.sign({ role: "admin" }, 'your_jwt_secret_key', { expiresIn: '1h' });
     res.json({ token });
   } else {
     res.status(401).json({ error: "Incorrect password." });
-  }
-});
-
-// Create Order with Real File Upload
-app.post('/api/orders', upload.single('document'), async (req, res) => {
-  try {
-    const newOrder = new Order({
-      orderNumber: req.body.orderNumber,
-      copies: req.body.copies,
-      paperSize: req.body.paperSize,
-      printType: req.body.printType,
-      sides: req.body.sides,
-      instructions: req.body.instructions,
-      paymentMethod: req.body.paymentMethod,
-      estimatedCost: req.body.estimatedCost,
-      status: "Pending",
-      filePath: req.file ? req.file.path : null
-    });
-    const savedOrder = await newOrder.save();
-    res.status(201).json(savedOrder);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
 });
 
@@ -100,7 +108,7 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-// Update order status (Protected with JWT)
+// Update order status
 app.put('/api/orders/:id', async (req, res) => {
   try {
     const updatedOrder = await Order.findByIdAndUpdate(
